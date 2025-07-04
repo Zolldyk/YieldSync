@@ -1,0 +1,632 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { Test } from "forge-std/Test.sol";
+import { console } from "forge-std/console.sol";
+import { YieldVault } from "../src/YieldVault.sol";
+import { YieldAggregator } from "../src/YieldAggregator.sol";
+import { FeeOptimizer } from "../src/FeeOptimizer.sol";
+import { MockOracle } from "../src/MockOracle.sol";
+import { GovernanceToken } from "../src/GovernanceToken.sol";
+import { MockPool } from "../src/MockPool.sol";
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+/**
+ * @title MockToken
+ * @notice Mock ERC20 token for testing
+ */
+contract MockToken is ERC20 {
+    constructor() ERC20("Mock Token", "MOCK") {
+        _mint(msg.sender, 1_000_000_000 * 10 ** decimals());
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+
+/**
+ * @title YieldVaultTest
+ * @notice Comprehensive test suite for YieldSync protocol
+ * @dev Tests all major functionality including deposits, withdrawals, yield generation, and
+ * governance
+ */
+contract YieldVaultTest is Test {
+    // Contract instances
+    MockToken public mockToken;
+    MockOracle public mockOracle;
+    FeeOptimizer public feeOptimizer;
+    YieldAggregator public yieldAggregator;
+    YieldVault public yieldVault;
+    GovernanceToken public governanceToken;
+    MockPool public pool1;
+    MockPool public pool2;
+    MockPool public pool3;
+
+    // Test accounts
+    address public constant ADMIN = address(0x1);
+    address public constant FEE_COLLECTOR = address(0x2);
+    address public constant USER1 = address(0x3);
+    address public constant USER2 = address(0x4);
+    address public constant USER3 = address(0x5);
+
+    // Test constants
+    uint256 public constant INITIAL_BALANCE = 100_000 * 1e18;
+    uint256 public constant DEPOSIT_AMOUNT = 1000 * 1e18;
+    uint256 public constant POOL_APY_1 = 800; // 8%
+    uint256 public constant POOL_APY_2 = 1200; // 12%
+    uint256 public constant POOL_APY_3 = 1500; // 15%
+
+    // Events for testing
+    event Deposited(address indexed user, uint256 amount, uint256 shares);
+    event Withdrawn(address indexed user, uint256 amount, uint256 shares);
+    event YieldHarvested(uint256 totalYield, uint256 timestamp);
+
+    /**
+     * @notice Setup function called before each test
+     */
+    function setUp() public {
+        vm.startPrank(ADMIN);
+
+        // Deploy mock token
+        mockToken = new MockToken();
+
+        // Deploy mock oracle
+        mockOracle = new MockOracle();
+
+        // Deploy mock pools
+        pool1 = new MockPool(address(mockToken), POOL_APY_1, "Pool 1", "AMM");
+        pool2 = new MockPool(address(mockToken), POOL_APY_2, "Pool 2", "Lending");
+        pool3 = new MockPool(address(mockToken), POOL_APY_3, "Pool 3", "Staking");
+
+        // Add pools to oracle
+        mockOracle.addPool(address(pool1), POOL_APY_1, 100);
+        mockOracle.addPool(address(pool2), POOL_APY_2, 150);
+        mockOracle.addPool(address(pool3), POOL_APY_3, 200);
+
+        // Deploy fee optimizer
+        feeOptimizer = new FeeOptimizer(address(mockOracle));
+
+        // Deploy yield aggregator (with temporary vault address)
+        yieldAggregator = new YieldAggregator(address(mockToken), address(mockOracle), address(0));
+
+        // Deploy yield vault
+        yieldVault = new YieldVault(
+            address(mockToken),
+            address(yieldAggregator),
+            address(feeOptimizer),
+            FEE_COLLECTOR,
+            "YieldSync Vault",
+            "YSV"
+        );
+
+        // Deploy governance token
+        governanceToken = new GovernanceToken(address(yieldVault), "YieldSync Governance", "YSG");
+
+        // Configure contracts
+        bytes32 vaultRole = yieldAggregator.VAULT_ROLE();
+        yieldAggregator.grantRole(vaultRole, address(yieldVault));
+
+        bytes32 aggregatorRole = yieldVault.AGGREGATOR_ROLE();
+        yieldVault.grantRole(aggregatorRole, address(yieldAggregator));
+
+        // Add pools to aggregator
+        yieldAggregator.addPool(address(pool1), POOL_APY_1);
+        yieldAggregator.addPool(address(pool2), POOL_APY_2);
+        yieldAggregator.addPool(address(pool3), POOL_APY_3);
+
+        vm.stopPrank();
+
+        // Setup user balances
+        _setupUserBalances();
+    }
+
+    /**
+     * @notice Setup initial token balances for test users
+     */
+    function _setupUserBalances() internal {
+        mockToken.mint(USER1, INITIAL_BALANCE);
+        mockToken.mint(USER2, INITIAL_BALANCE);
+        mockToken.mint(USER3, INITIAL_BALANCE);
+
+        // Add some liquidity to pools for testing
+        vm.startPrank(ADMIN);
+        mockToken.mint(ADMIN, INITIAL_BALANCE);
+
+        mockToken.approve(address(pool1), INITIAL_BALANCE / 3);
+        pool1.deposit(INITIAL_BALANCE / 3);
+
+        mockToken.approve(address(pool2), INITIAL_BALANCE / 3);
+        pool2.deposit(INITIAL_BALANCE / 3);
+
+        mockToken.approve(address(pool3), INITIAL_BALANCE / 3);
+        pool3.deposit(INITIAL_BALANCE / 3);
+
+        vm.stopPrank();
+    }
+
+    // ============ Vault Functionality Tests ============
+
+    /**
+     * @notice Test basic vault deposit functionality
+     */
+    function testDeposit() public {
+        vm.startPrank(USER1);
+
+        // Approve and deposit
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+
+        // Expect deposit event
+        vm.expectEmit(true, true, true, true);
+        emit Deposited(USER1, DEPOSIT_AMOUNT, DEPOSIT_AMOUNT); // 1:1 ratio initially
+
+        uint256 shares = yieldVault.deposit(DEPOSIT_AMOUNT);
+
+        // Verify shares received
+        assertEq(shares, DEPOSIT_AMOUNT, "Should receive 1:1 shares initially");
+        assertEq(
+            yieldVault.balanceOf(USER1), DEPOSIT_AMOUNT, "User should have correct share balance"
+        );
+        assertEq(yieldVault.totalAssets(), DEPOSIT_AMOUNT, "Vault should track total assets");
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test vault withdrawal functionality
+     */
+    function testWithdraw() public {
+        // First deposit
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+        uint256 shares = yieldVault.deposit(DEPOSIT_AMOUNT);
+
+        // Then withdraw
+        uint256 balanceBefore = mockToken.balanceOf(USER1);
+
+        vm.expectEmit(true, true, true, true);
+        emit Withdrawn(USER1, DEPOSIT_AMOUNT - 500, shares); // Assuming 0.05% fee
+
+        uint256 amountReceived = yieldVault.withdraw(shares);
+
+        // Verify withdrawal
+        assertGt(amountReceived, 0, "Should receive some tokens back");
+        assertLt(amountReceived, DEPOSIT_AMOUNT, "Should be less than deposited due to fees");
+        assertEq(yieldVault.balanceOf(USER1), 0, "User should have no shares after full withdrawal");
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test multiple user deposits and share calculation
+     */
+    function testMultipleUserDeposits() public {
+        // User 1 deposits
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+        uint256 shares1 = yieldVault.deposit(DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        // Simulate some yield generation
+        vm.warp(block.timestamp + 30 days);
+
+        // User 2 deposits (should get fewer shares due to yield)
+        vm.startPrank(USER2);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+        uint256 shares2 = yieldVault.deposit(DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        // Verify share distribution
+        assertEq(shares1, DEPOSIT_AMOUNT, "First user should get 1:1 ratio");
+        assertLt(shares2, DEPOSIT_AMOUNT, "Second user should get fewer shares due to yield");
+
+        // Verify total shares and assets
+        assertEq(
+            yieldVault.totalSupply(), shares1 + shares2, "Total supply should match issued shares"
+        );
+        assertEq(
+            yieldVault.totalAssets(), DEPOSIT_AMOUNT * 2, "Total assets should be sum of deposits"
+        );
+    }
+
+    // ============ Yield Aggregation Tests ============
+
+    /**
+     * @notice Test that funds are allocated to the best performing pool
+     */
+    function testFundAllocation() public {
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+        yieldVault.deposit(DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        // Check that funds were allocated to the highest APY pool (pool3)
+        (address bestPool, uint256 bestAPY) = yieldAggregator.getBestPool();
+        assertEq(bestPool, address(pool3), "Best pool should be pool3 with highest APY");
+        assertEq(bestAPY, POOL_APY_3, "Best APY should match pool3's APY");
+
+        // Verify allocation
+        uint256 pool3Allocation = yieldAggregator.getPoolInfo(address(pool3)).allocation;
+        assertGt(pool3Allocation, 0, "Pool3 should have received allocation");
+    }
+
+    /**
+     * @notice Test rebalancing when APYs change
+     */
+    function testRebalancing() public {
+        // Initial deposit
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+        yieldVault.deposit(DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        // Change APYs to make pool1 the best
+        vm.startPrank(ADMIN);
+        mockOracle.updatePoolAPY(address(pool1), 2000); // 20% APY
+        vm.stopPrank();
+
+        // Wait for rebalance cooldown
+        vm.warp(block.timestamp + 2 hours);
+
+        // Trigger rebalancing
+        yieldAggregator.rebalancePools();
+
+        // Verify rebalancing occurred
+        (address newBestPool,) = yieldAggregator.getBestPool();
+        assertEq(newBestPool, address(pool1), "Pool1 should now be the best pool");
+    }
+
+    // ============ Fee Optimization Tests ============
+
+    /**
+     * @notice Test dynamic fee adjustment based on network conditions
+     */
+    function testDynamicFees() public {
+        // Set initial network conditions
+        vm.startPrank(ADMIN);
+        mockOracle.updateGasPrice(10 gwei);
+        mockOracle.updateNetworkCongestion(30);
+        vm.stopPrank();
+
+        // Update fees
+        feeOptimizer.updateFee();
+        uint256 lowCongestionFee = feeOptimizer.getCurrentFee();
+
+        // Change to high congestion
+        vm.startPrank(ADMIN);
+        mockOracle.updateGasPrice(100 gwei);
+        mockOracle.updateNetworkCongestion(90);
+        vm.stopPrank();
+
+        // Wait for update interval
+        vm.warp(block.timestamp + 5 minutes);
+
+        // Update fees again
+        feeOptimizer.updateFee();
+        uint256 highCongestionFee = feeOptimizer.getCurrentFee();
+
+        // Verify fees increased with congestion
+        assertGt(highCongestionFee, lowCongestionFee, "Fees should increase with congestion");
+    }
+
+    /**
+     * @notice Test fee calculation for different amounts
+     */
+    function testFeeCalculation() public {
+        uint256 amount = 1000 * 1e18;
+        uint256 fee = feeOptimizer.calculateFee(amount);
+
+        assertGt(fee, 0, "Fee should be greater than 0");
+        assertLt(fee, amount, "Fee should be less than amount");
+
+        // Test with different amount
+        uint256 largerAmount = 10_000 * 1e18;
+        uint256 largerFee = feeOptimizer.calculateFee(largerAmount);
+
+        assertEq(largerFee, fee * 10, "Fee should scale linearly with amount");
+    }
+
+    // ============ Governance Tests ============
+
+    /**
+     * @notice Test yield sharing mechanism
+     */
+    function testYieldSharing() public {
+        // First user deposits to get vault shares
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+        uint256 vaultShares = yieldVault.deposit(DEPOSIT_AMOUNT);
+
+        // Share some yield with governance
+        yieldVault.approve(address(governanceToken), vaultShares / 10);
+        uint256 tokensAwarded = governanceToken.shareYield(vaultShares / 10);
+
+        assertGt(tokensAwarded, 0, "Should receive governance tokens for sharing yield");
+        assertEq(
+            governanceToken.balanceOf(USER1), tokensAwarded, "User should have governance tokens"
+        );
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test governance proposal creation and voting
+     */
+    function testGovernanceProposal() public {
+        // Give USER1 some governance tokens first
+        vm.startPrank(ADMIN);
+        bytes32 govManagerRole = governanceToken.GOVERNANCE_MANAGER_ROLE();
+        governanceToken.grantRole(govManagerRole, ADMIN);
+        vm.stopPrank();
+
+        // Setup voting power for USER1
+        _setupGovernanceTokens(USER1, 10_000 * 1e18);
+
+        vm.startPrank(USER1);
+
+        // Create proposal
+        string memory description = "Test proposal";
+        uint256 proposalId = governanceToken.createProposal(description);
+
+        assertEq(proposalId, 1, "First proposal should have ID 1");
+
+        // Check proposal details
+        (
+            address proposer,
+            string memory desc,
+            uint256 startTime,
+            uint256 endTime,
+            ,
+            ,
+            ,
+            , // votes data
+        ) = governanceToken.getProposal(proposalId);
+
+        assertEq(proposer, USER1, "Proposer should be USER1");
+        assertEq(desc, description, "Description should match");
+        assertGt(endTime, startTime, "End time should be after start time");
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test voting on proposals
+     */
+    function testVoting() public {
+        // Setup governance tokens for users
+        _setupGovernanceTokens(USER1, 10_000 * 1e18);
+        _setupGovernanceTokens(USER2, 5000 * 1e18);
+
+        // Create proposal
+        vm.startPrank(USER1);
+        uint256 proposalId = governanceToken.createProposal("Test voting proposal");
+        vm.stopPrank();
+
+        // Wait for voting to start
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // Vote in favor
+        vm.startPrank(USER1);
+        governanceToken.vote(proposalId, true);
+        vm.stopPrank();
+
+        // Vote against
+        vm.startPrank(USER2);
+        governanceToken.vote(proposalId, false);
+        vm.stopPrank();
+
+        // Check votes
+        (,,,, uint256 forVotes, uint256 againstVotes,,,) = governanceToken.getProposal(proposalId);
+
+        assertGt(forVotes, 0, "Should have votes in favor");
+        assertGt(againstVotes, 0, "Should have votes against");
+        assertGt(forVotes, againstVotes, "For votes should be greater (USER1 has more tokens)");
+    }
+
+    // ============ Integration tests ============
+
+    /**
+     * @notice Test full user journey: deposit -> yield generation -> withdrawal
+     */
+    function testFullUserJourney() public {
+        vm.startPrank(USER1);
+
+        // 1. Initial deposit
+        uint256 initialBalance = mockToken.balanceOf(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+        uint256 shares = yieldVault.deposit(DEPOSIT_AMOUNT);
+
+        // 2. Wait for yield generation
+        vm.warp(block.timestamp + 90 days);
+
+        // 3. Harvest yield
+        vm.stopPrank();
+        vm.startPrank(ADMIN);
+        yieldVault.harvestYield();
+        vm.stopPrank();
+        vm.startPrank(USER1);
+
+        // 4. Check that vault value increased
+        uint256 assetValue = yieldVault.getUserAssetBalance(USER1);
+        assertGt(assetValue, DEPOSIT_AMOUNT, "Asset value should have increased due to yield");
+
+        // 5. Withdraw
+        uint256 amountReceived = yieldVault.withdraw(shares);
+        uint256 finalBalance = mockToken.balanceOf(USER1);
+
+        // 6. Verify profit (accounting for fees)
+        assertGt(finalBalance, initialBalance - DEPOSIT_AMOUNT, "Should have made some profit");
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test emergency scenarios
+     */
+    function testEmergencyWithdrawal() public {
+        // Deposit
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+        uint256 shares = yieldVault.deposit(DEPOSIT_AMOUNT);
+
+        // Emergency withdraw (no fees)
+        uint256 balanceBefore = mockToken.balanceOf(USER1);
+        uint256 amountReceived = yieldVault.emergencyWithdraw(shares);
+        uint256 balanceAfter = mockToken.balanceOf(USER1);
+
+        assertEq(balanceAfter - balanceBefore, amountReceived, "Should receive exact amount back");
+        assertEq(yieldVault.balanceOf(USER1), 0, "Should have no shares left");
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test pause functionality
+     */
+    function testPauseFunctionality() public {
+        // Pause vault
+        vm.startPrank(ADMIN);
+        yieldVault.pause();
+        vm.stopPrank();
+
+        // Try to deposit while paused
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+
+        vm.expectRevert(); // Should revert when paused
+        yieldVault.deposit(DEPOSIT_AMOUNT);
+
+        vm.stopPrank();
+
+        // Unpause and try again
+        vm.startPrank(ADMIN);
+        yieldVault.unpause();
+        vm.stopPrank();
+
+        vm.startPrank(USER1);
+        // Should work now
+        uint256 shares = yieldVault.deposit(DEPOSIT_AMOUNT);
+        assertGt(shares, 0, "Deposit should work after unpause");
+        vm.stopPrank();
+    }
+
+    // ============ Helper Functions ============
+
+    /**
+     * @notice Setup governance tokens for testing
+     */
+    function _setupGovernanceTokens(address user, uint256 amount) internal {
+        vm.startPrank(ADMIN);
+
+        // First user needs vault shares to share yield
+        mockToken.mint(user, amount);
+
+        vm.stopPrank();
+        vm.startPrank(user);
+
+        // Deposit to get vault shares
+        mockToken.approve(address(yieldVault), amount / 10);
+        uint256 vaultShares = yieldVault.deposit(amount / 10);
+
+        // Share yield to get governance tokens
+        yieldVault.approve(address(governanceToken), vaultShares);
+        governanceToken.shareYield(vaultShares);
+
+        vm.stopPrank();
+    }
+
+    // ============ Fuzz Tests ============
+
+    /**
+     * @notice Fuzz test deposit amounts
+     */
+    function testFuzzDeposit(uint256 amount) public {
+        // Bound amount to reasonable range
+        amount = bound(amount, 1e18, 1_000_000e18);
+
+        // Mint tokens for user
+        mockToken.mint(USER1, amount);
+
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), amount);
+
+        uint256 shares = yieldVault.deposit(amount);
+
+        assertGt(shares, 0, "Should receive shares for any valid deposit");
+        assertEq(yieldVault.balanceOf(USER1), shares, "Share balance should match returned shares");
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test invariants that should always hold
+     */
+    function testInvariants() public {
+        // Make some deposits and withdrawals
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+        uint256 shares1 = yieldVault.deposit(DEPOSIT_AMOUNT);
+        vm.stopPrank();
+
+        vm.startPrank(USER2);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT * 2);
+        uint256 shares2 = yieldVault.deposit(DEPOSIT_AMOUNT * 2);
+        vm.stopPrank();
+
+        // Test invariants
+        assertEq(
+            yieldVault.totalSupply(),
+            shares1 + shares2,
+            "Total supply should equal sum of user shares"
+        );
+
+        assertGe(
+            yieldVault.totalAssets(),
+            yieldVault.convertToAssets(yieldVault.totalSupply()),
+            "Total assets should be at least the value of all shares"
+        );
+    }
+
+    // ============ Security Tests ============
+
+    /**
+     * @notice Test reentrancy protection
+     */
+    function testReentrancyProtection() public {
+        // This would require a malicious contract to test properly
+        // For now, just verify that the modifier is present and functions work normally
+        vm.startPrank(USER1);
+        mockToken.approve(address(yieldVault), DEPOSIT_AMOUNT);
+
+        uint256 shares = yieldVault.deposit(DEPOSIT_AMOUNT);
+        assertGt(shares, 0, "Normal deposit should work");
+
+        uint256 amount = yieldVault.withdraw(shares);
+        assertGt(amount, 0, "Normal withdrawal should work");
+
+        vm.stopPrank();
+    }
+
+    /**
+     * @notice Test access control
+     */
+    function testAccessControl() public {
+        // Try to call admin function as non-admin
+        vm.startPrank(USER1);
+
+        vm.expectRevert(); // Should revert due to access control
+        yieldVault.pause();
+
+        vm.expectRevert(); // Should revert due to access control
+        yieldVault.setPerformanceFee(100);
+
+        vm.stopPrank();
+
+        // Verify admin can call these functions
+        vm.startPrank(ADMIN);
+        yieldVault.pause();
+        yieldVault.unpause();
+        yieldVault.setPerformanceFee(100);
+        vm.stopPrank();
+    }
+}

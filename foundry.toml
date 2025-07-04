@@ -1,0 +1,36 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+solc_version = "0.8.24"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+
+# Test configuration
+[profile.test]
+src = "test"
+test = "test"
+script = "test"
+
+[profile.default.model_checker]
+contracts = { "/src" = ["CHC"] }
+
+[rpc_endpoints]
+blockdag = "https://rpc.primordial.bdagscan.com"
+
+[etherscan]
+blockdag = { key = "your_api_key_here", url = "https://primordial.bdagscan.com/api" }
+
+[fmt]
+bracket_spacing = true
+int_types = "long"
+line_length = 100
+multiline_func_header = "all"
+number_underscore = "thousands"
+quote_style = "double"
+tab_width = 4
+wrap_comments = true
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
