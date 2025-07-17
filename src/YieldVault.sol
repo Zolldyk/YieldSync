@@ -283,6 +283,23 @@ contract YieldVault is IYieldVault, ERC20, ReentrancyGuard, AccessControl, Pausa
         uint256 fee = feeOptimizer.calculateFee(amount);
         uint256 amountAfterFee = amount - fee;
 
+        // Ensure vault has sufficient balance for withdrawal + fee
+        uint256 vaultBalance = asset.balanceOf(address(this));
+        if (vaultBalance < amount) {
+            // Request funds from aggregator
+            aggregator.withdrawForVault(amount - vaultBalance);
+            vaultBalance = asset.balanceOf(address(this));
+        }
+
+        // Check if we actually have enough after aggregator withdrawal
+        // (pool withdrawal fees may reduce the amount we get back)
+        if (vaultBalance < amount) {
+            // Adjust the withdrawal amount based on what's actually available
+            amount = vaultBalance;
+            fee = feeOptimizer.calculateFee(amount);
+            amountAfterFee = amount - fee;
+        }
+
         // Update user information
         UserInfo storage userInfo = s_userInfo[msg.sender];
         userInfo.shares -= shares;
@@ -326,6 +343,21 @@ contract YieldVault is IYieldVault, ERC20, ReentrancyGuard, AccessControl, Pausa
 
         // Calculate amount to withdraw (no fees in emergency)
         amount = convertToAssets(shares);
+
+        // Ensure vault has sufficient balance for withdrawal
+        uint256 vaultBalance = asset.balanceOf(address(this));
+        if (vaultBalance < amount) {
+            // Request funds from aggregator
+            aggregator.withdrawForVault(amount - vaultBalance);
+            vaultBalance = asset.balanceOf(address(this));
+        }
+
+        // Check if we actually have enough after aggregator withdrawal
+        // (pool withdrawal fees may reduce the amount we get back)
+        if (vaultBalance < amount) {
+            // Adjust the withdrawal amount based on what's actually available
+            amount = vaultBalance;
+        }
 
         // Update user information
         UserInfo storage userInfo = s_userInfo[msg.sender];

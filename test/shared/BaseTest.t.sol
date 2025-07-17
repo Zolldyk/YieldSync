@@ -85,10 +85,10 @@ contract BaseTest is Test {
         // Deploy fee optimizer
         feeOptimizer = new FeeOptimizer(address(mockOracle));
 
-        // Deploy yield aggregator (with temporary vault address)
+        // Deploy yield aggregator first (with temporary vault address)
         yieldAggregator = new YieldAggregator(address(mockToken), address(mockOracle), address(1));
 
-        // Deploy yield vault
+        // Deploy yield vault with aggregator address
         yieldVault = new YieldVault(
             address(mockToken),
             address(yieldAggregator),
@@ -97,6 +97,9 @@ contract BaseTest is Test {
             "YieldSync Vault",
             "YSV"
         );
+
+        // Set the correct vault address in the aggregator
+        yieldAggregator.setVault(address(yieldVault));
 
         // Deploy governance token
         governanceToken = new GovernanceToken(address(yieldVault), "YieldSync Governance", "YSG");
@@ -162,6 +165,9 @@ contract BaseTest is Test {
         // Share yield to get governance tokens
         yieldVault.approve(address(governanceToken), vaultShares);
         governanceToken.shareYield(vaultShares);
+
+        // Delegate voting power to self (required for ERC20Votes)
+        governanceToken.delegate(user);
 
         vm.stopPrank();
     }

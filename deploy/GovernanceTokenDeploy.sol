@@ -1,14 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import { ERC20Votes } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
-import { ERC20Permit } from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
-import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { Nonces } from "@openzeppelin/contracts/utils/Nonces.sol";
-import { IGovernanceToken } from "./interfaces/IGovernanceToken.sol";
+// Import statements - you'll need to flatten the contract for BlockDAG IDE
+// This is a flattened version ready for direct deployment
 
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/utils/Nonces.sol";
+
+/**
+ * @title IGovernanceToken
+ * @notice Interface for governance token functionality
+ */
+interface IGovernanceToken {
+    function shareYield(uint256 amount) external returns (uint256 tokensAwarded);
+    function createProposal(string calldata description) external returns (uint256 proposalId);
+    function vote(uint256 proposalId, bool support) external;
+    function getYieldSharingRate() external view returns (uint256 rate);
+    function getVotingPower(address user) external view returns (uint256 votingPower);
+}
+
+/**
+ * @title GovernanceToken
+ * @notice Updated governance token with full voting functionality
+ */
 contract GovernanceToken is IGovernanceToken, ERC20, ERC20Votes, ERC20Permit, AccessControl {
     error InvalidAmount();
     error Unauthorized();
@@ -74,6 +92,12 @@ contract GovernanceToken is IGovernanceToken, ERC20, ERC20Votes, ERC20Permit, Ac
         _;
     }
 
+    /**
+     * @notice Constructor - Deploy with these parameters:
+     * @param _yieldToken: 0xE63cE0E709eB6E7f345133C681Ba177df603e804 (YieldVault address)
+     * @param _name: "YieldSync Governance"
+     * @param _symbol: "YSG"
+     */
     constructor(
         address _yieldToken,
         string memory _name,

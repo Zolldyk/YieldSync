@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import { YieldAggregator } from "../YieldAggregator.sol";
-
 /**
  * @title IYieldAggregator
  * @author YieldSync Team
@@ -47,4 +45,10 @@ interface IYieldAggregator {
      * @return pools Array of active pool addresses
      */
     function getActivePools() external view returns (address[] memory pools);
+
+    /**
+     * @notice Withdraw funds for vault redemptions
+     * @param amount The amount to withdraw and send back to vault
+     */
+    function withdrawForVault(uint256 amount) external;
 }

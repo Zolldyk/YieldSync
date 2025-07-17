@@ -75,7 +75,7 @@ contract YieldAggregator is IYieldAggregator, ReentrancyGuard, AccessControl, Pa
     IMockOracle public immutable oracle;
 
     /// @notice The vault contract address
-    address public immutable vault;
+    address public vault;
 
     /// @notice Role identifier for managers
     bytes32 public constant MANAGER_ROLE = keccak256("MANAGER_ROLE");
@@ -179,7 +179,6 @@ contract YieldAggregator is IYieldAggregator, ReentrancyGuard, AccessControl, Pa
     )
         validAddress(_asset)
         validAddress(_oracle)
-        validAddress(_vault)
     {
         asset = IERC20(_asset);
         oracle = IMockOracle(_oracle);
@@ -213,6 +212,9 @@ contract YieldAggregator is IYieldAggregator, ReentrancyGuard, AccessControl, Pa
         whenNotPaused
         validAmount(amount)
     {
+        // Transfer funds from vault to aggregator first
+        asset.safeTransferFrom(vault, address(this), amount);
+
         // Update pool APYs from oracle
         _updatePoolAPYs();
 
@@ -444,6 +446,46 @@ contract YieldAggregator is IYieldAggregator, ReentrancyGuard, AccessControl, Pa
         _unpause();
     }
 
+    /**
+     * @notice Set the vault address (for setup purposes)
+     * @param _vault The vault contract address
+     */
+    function setVault(address _vault) external onlyManager validAddress(_vault) {
+        vault = _vault;
+    }
+
+    /**
+     * @notice Withdraw funds for vault redemptions
+     * @param amount The amount to withdraw and send back to vault
+     */
+    function withdrawForVault(uint256 amount) external onlyVault validAmount(amount) {
+        // Find pools with sufficient allocation to withdraw from
+        uint256 remainingAmount = amount;
+        
+        // Simple approach: withdraw from pools with highest allocation first
+        for (uint256 i = 0; i < s_poolAddresses.length && remainingAmount > 0; i++) {
+            address poolAddress = s_poolAddresses[i];
+            PoolInfo storage poolInfo = s_poolInfo[poolAddress];
+            
+            if (poolInfo.isActive && poolInfo.allocation > 0) {
+                uint256 withdrawAmount = remainingAmount < poolInfo.allocation 
+                    ? remainingAmount 
+                    : poolInfo.allocation;
+                
+                _withdrawFromPool(poolAddress, withdrawAmount);
+                remainingAmount -= withdrawAmount;
+            }
+        }
+        
+        // Transfer requested amount back to vault
+        uint256 availableBalance = asset.balanceOf(address(this));
+        uint256 transferAmount = amount < availableBalance ? amount : availableBalance;
+        
+        if (transferAmount > 0) {
+            asset.safeTransfer(vault, transferAmount);
+        }
+    }
+
     // ============ Public Functions ============
     /**
      * @notice Get the best pool for allocation
@@ -539,10 +581,17 @@ contract YieldAggregator is IYieldAggregator, ReentrancyGuard, AccessControl, Pa
     function _allocateToPool(address poolAddress, uint256 amount) internal {
         PoolInfo storage poolInfo = s_poolInfo[poolAddress];
 
-        // Transfer funds to pool
-        asset.safeTransfer(poolAddress, amount);
+        // Check if we have sufficient funds - during rebalancing, funds should already be available
+        // from withdrawn pools. During initial allocation, vault transfers funds directly.
+        uint256 currentBalance = asset.balanceOf(address(this));
+        if (currentBalance < amount) {
+            revert YieldAggregator__InsufficientFunds();
+        }
 
-        // Deposit into pool
+        // Approve pool to spend tokens from this contract
+        asset.forceApprove(poolAddress, amount);
+
+        // Deposit into pool (pool will transfer tokens from this contract)
         IMockPool(poolAddress).deposit(amount);
 
         // Update allocation
@@ -574,13 +623,49 @@ contract YieldAggregator is IYieldAggregator, ReentrancyGuard, AccessControl, Pa
      * @param amount The amount to reallocate
      */
     function _reallocateFromPool(address fromPool, address toPool, uint256 amount) internal {
+        // Track balance before withdrawal
+        uint256 balanceBefore = asset.balanceOf(address(this));
+        
         // Withdraw from source pool
         _withdrawFromPool(fromPool, amount);
+        
+        // Get actual amount received (after any fees)
+        uint256 balanceAfter = asset.balanceOf(address(this));
+        uint256 actualAmountReceived = balanceAfter - balanceBefore;
 
-        // Allocate to destination pool
-        _allocateToPool(toPool, amount);
+        // Allocate actual amount received to destination pool
+        if (actualAmountReceived > 0) {
+            _allocateToPoolReallocation(toPool, actualAmountReceived);
+            emit FundsReallocated(fromPool, toPool, actualAmountReceived);
+        }
+    }
 
-        emit FundsReallocated(fromPool, toPool, amount);
+    /**
+     * @notice Allocate funds to a specific pool during reallocation
+     * @param poolAddress The pool address
+     * @param amount The amount to allocate
+     */
+    function _allocateToPoolReallocation(address poolAddress, uint256 amount) internal {
+        PoolInfo storage poolInfo = s_poolInfo[poolAddress];
+
+        // Check if we have sufficient funds - during rebalancing, funds should already be available
+        // from withdrawn pools
+        uint256 currentBalance = asset.balanceOf(address(this));
+        if (currentBalance < amount) {
+            revert YieldAggregator__InsufficientFunds();
+        }
+
+        // Approve pool to spend tokens from this contract
+        asset.forceApprove(poolAddress, amount);
+
+        // Deposit into pool (pool will transfer tokens from this contract)
+        IMockPool(poolAddress).deposit(amount);
+
+        // Update allocation and total allocated
+        poolInfo.allocation += amount;
+        s_totalAllocated += amount; // Add the actual amount allocated
+
+        emit FundsAllocated(poolAddress, amount);
     }
 
     /**
@@ -778,7 +863,7 @@ contract YieldAggregator is IYieldAggregator, ReentrancyGuard, AccessControl, Pa
     function previewAllocation(uint256 amount)
         external
         view
-        returns (address[] memory pools, uint256[] memory allocations)
+        returns (address[] memory, uint256[] memory)
     {
         (address bestPool,) = getBestPool();
 
@@ -787,64 +872,65 @@ contract YieldAggregator is IYieldAggregator, ReentrancyGuard, AccessControl, Pa
         }
 
         // Simple case: allocate to best pool if within limits
-        uint256 maxAllowedAllocation =
-            (s_totalAllocated + amount) * s_maxPoolAllocation / BASIS_POINTS;
-        uint256 currentAllocation = s_poolInfo[bestPool].allocation;
-
-        if (currentAllocation + amount <= maxAllowedAllocation) {
-            pools = new address[](1);
-            allocations = new uint256[](1);
+        if (s_poolInfo[bestPool].allocation + amount <= (s_totalAllocated + amount) * s_maxPoolAllocation / BASIS_POINTS) {
+            address[] memory pools = new address[](1);
+            uint256[] memory allocations = new uint256[](1);
             pools[0] = bestPool;
             allocations[0] = amount;
-        } else {
-            // Complex case: distribute across pools
-            address[] memory sortedPools = _getSortedPoolsByAPY();
-            uint256 activePoolCount = 0;
+            return (pools, allocations);
+        }
 
-            // Count pools that can receive allocation
-            for (uint256 i = 0; i < sortedPools.length; i++) {
-                if (s_poolInfo[sortedPools[i]].isActive) {
-                    activePoolCount++;
-                }
-            }
+        // Complex case: distribute across pools
+        return _previewDistribution(amount);
+    }
 
-            pools = new address[](activePoolCount);
-            allocations = new uint256[](activePoolCount);
-
-            uint256 remainingAmount = amount;
-            uint256 totalAllocatedAfter = s_totalAllocated + amount;
-            uint256 index = 0;
-
-            for (uint256 i = 0; i < sortedPools.length && remainingAmount > 0; i++) {
-                address poolAddress = sortedPools[i];
-                PoolInfo memory poolInfo = s_poolInfo[poolAddress];
-
-                if (!poolInfo.isActive) continue;
-
-                uint256 maxAllowedForPool =
-                    (totalAllocatedAfter * s_maxPoolAllocation) / BASIS_POINTS;
-                uint256 availableCapacity = maxAllowedForPool > poolInfo.allocation
-                    ? maxAllowedForPool - poolInfo.allocation
-                    : 0;
-
-                if (availableCapacity >= s_minAllocation) {
-                    uint256 allocationAmount =
-                        remainingAmount < availableCapacity ? remainingAmount : availableCapacity;
-
-                    pools[index] = poolAddress;
-                    allocations[index] = allocationAmount;
-                    remainingAmount -= allocationAmount;
-                    index++;
-                }
-            }
-
-            // Resize arrays to actual size
-            assembly {
-                mstore(pools, index)
-                mstore(allocations, index)
+    function _previewDistribution(uint256 amount)
+        internal
+        view
+        returns (address[] memory, uint256[] memory)
+    {
+        address[] memory sortedPools = _getSortedPoolsByAPY();
+        
+        // Count active pools first
+        uint256 activeCount;
+        for (uint256 i = 0; i < sortedPools.length; i++) {
+            if (s_poolInfo[sortedPools[i]].isActive) {
+                activeCount++;
             }
         }
+
+        address[] memory pools = new address[](activeCount);
+        uint256[] memory allocations = new uint256[](activeCount);
+
+        uint256 remaining = amount;
+        uint256 totalAfter = s_totalAllocated + amount;
+        uint256 index = 0;
+
+        for (uint256 i = 0; i < sortedPools.length && remaining > 0; i++) {
+            if (!s_poolInfo[sortedPools[i]].isActive) continue;
+
+            uint256 capacity = (totalAfter * s_maxPoolAllocation) / BASIS_POINTS;
+            if (capacity <= s_poolInfo[sortedPools[i]].allocation) continue;
+            
+            capacity -= s_poolInfo[sortedPools[i]].allocation;
+            if (capacity < s_minAllocation) continue;
+
+            uint256 allocation = remaining < capacity ? remaining : capacity;
+            pools[index] = sortedPools[i];
+            allocations[index] = allocation;
+            remaining -= allocation;
+            index++;
+        }
+
+        // Resize arrays to actual size
+        assembly {
+            mstore(pools, index)
+            mstore(allocations, index)
+        }
+        
+        return (pools, allocations);
     }
+
 
     /**
      * @notice Get estimated yield for a given amount and duration
