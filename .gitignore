@@ -10,6 +10,9 @@ out/
 # Docs
 docs/
 
+# White paper (confidential)
+WHITEPAPER.md
+
 # Dotenv file
 .env
 .vercel

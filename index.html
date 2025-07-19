@@ -1187,12 +1187,10 @@
             // Setup event listeners
             setupEventListeners();
 
-            // Hide loading overlay and show main app
-            setTimeout(() => {
-                document.getElementById('loadingOverlay').classList.add('hidden');
-                document.getElementById('mainApp').classList.remove('hidden');
-                showNotification('✅ YieldSync Initialized', 'Application loaded successfully!', 'success');
-            }, 2000);
+            // Hide loading overlay and show main app immediately after initialization
+            document.getElementById('loadingOverlay').classList.add('hidden');
+            document.getElementById('mainApp').classList.remove('hidden');
+            showNotification('✅ YieldSync Initialized', 'Application loaded successfully!', 'success');
         });
 
         // ============ App Initialization ============
