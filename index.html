@@ -1180,16 +1180,23 @@
         document.addEventListener('DOMContentLoaded', async function () {
             console.log('🚀 YieldSync Frontend Initializing...');
 
-            // Initialize the application
-            await initializeApp();
+            try {
+                // Initialize the application
+                await initializeApp();
 
-            // Setup event listeners
-            setupEventListeners();
+                // Setup event listeners
+                setupEventListeners();
 
-            // Hide loading overlay and show main app immediately after initialization
-            document.getElementById('loadingOverlay').classList.add('hidden');
-            document.getElementById('mainApp').classList.remove('hidden');
-            showNotification('✅ YieldSync Initialized', 'Application loaded successfully!', 'success');
+                console.log('✅ Initialization completed successfully');
+            } catch (error) {
+                console.error('❌ Initialization error:', error);
+                showNotification('⚠️ Initialization Warning', 'Some features may not work properly', 'warning');
+            } finally {
+                // ALWAYS hide loading overlay regardless of initialization success/failure
+                document.getElementById('loadingOverlay').classList.add('hidden');
+                document.getElementById('mainApp').classList.remove('hidden');
+                showNotification('✅ YieldSync Loaded', 'Application is ready to use!', 'success');
+            }
         });
 
         // ============ App Initialization ============
